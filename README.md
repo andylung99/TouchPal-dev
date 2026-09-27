@@ -1,0 +1,121 @@
+触宝输入法（TouchPal）五笔补丁方案
+目标：在不 ROOT、不重装、后端服务器已全线失效的触宝输入法 com.cootek.smartinputv5（v6.5.2.1）上， 让用户用普通拼音键盘直接敲五笔编码出词（如敲 aaad → 候选 工期）。
+
+本目录 TouchPal/ 是自包含、可独立运行的成品方案：脚本不含任何个人绝对路径， 会自动定位 adb、自动探测在线设备，任何人克隆本仓库后即可直接使用。
+
+1. 方案一句话原理
+触宝的五笔语言包 wubi.rom 方案没有生效（见 §7 注意点），真正可用的是替代方案：
+
+把「五笔编码 → 中文词」批量写成触宝的自定义短语文件 shortcut.lst， 通过触宝自带的「备份/恢复用户词到 SD 卡」通道灌进应用私有目录 getFilesDir()， 于是用户在拼音键盘上敲五笔码时，触宝会把它当作自定义短语触发并上屏对应的中文词。
+
+关键点：不碰触宝的键盘/引擎，只喂给它一张「码表」。码表的触发串就是五笔全码（纯小写字母，最长 4 键）， 所以它天然不与拼音音节冲突（全码级别）；短简码则限量叠加（见 §5）。
+
+2. 目录结构
+TouchPal/
+├── 触宝输入法五笔补丁方案.md   本文件
+├── .gitignore                  忽略生成物（work/、*.custom.lst、*.new.zip）
+├── bin/                        可执行脚本（全部可独立运行）
+│   ├── _adb.ps1                共享：自动定位 adb.exe + 自动选择设备
+│   ├── install-ime.ps1         【第一步】安装 APK 并设为默认，含"键盘弹不出"修复
+│   ├── deploy.ps1              把词库注入 SD 备份并推送，触发导入
+│   ├── readback.ps1            拉回设备上的 shortcut.lst，校验到底导入了多少条
+│   └── build-phrase.ps1        从 wubi.txt 重新构建/自定义词库（逆向/调优入口）
+├── lib/                        自包含的 Node 工具（方案的全部核心算法）
+│   ├── shortcut_build.js       shortcut.lst 的 build / merge / parse / find / stats
+│   ├── ziprebuild.js           字节忠实重建 files.zip（保持其余条目原样）
+│   ├── zipdir.js               列出 zip 条目
+│   ├── ziptake.js              按正则从 zip 抽出条目
+│   └── scutview.js             shortcut.lst 十六进制/记录查看
+├── dict/                       数据
+│   ├── wubi.txt                五笔86词库源（rime-wubi86-jidian，格式 词 码 权重，89254 条）
+│   ├── full.lst                ★ 成品词库（已部署版本，约 1.76MB / 89254 条）
+│   └── pilot.lst               小样试点（400 条，先验证通路再全量）
+├── apk/                        输入法安装包（已入库，便于他人从零安装）
+│   └── base.apk                触宝官方原版 v6.5.2.1（cootek 签名，约 43MB）
+└── work/                       脚本运行临时产物（已 gitignore，可随意删）
+3. 使用教程（最快路径）
+前置条件
+Windows + PowerShell 5.1+；已安装 Node.js（脚本内所有算法走 node）。
+USB 调试已开、只连一台设备（多台时用 -Device <序列号> 指定）。
+adb 能定位到（三选一即可，脚本自动尝试）：adb 在 PATH；或设置 ANDROID_HOME/ANDROID_SDK_ROOT； 或仓库根 local.properties 里有 sdk.dir=...。
+第 0 步：安装触宝输入法（首次使用 / 或键盘弹不出时）
+powershell -File TouchPal\bin\install-ime.ps1         # 用随仓库的 apk\base.apk
+powershell -File TouchPal\bin\install-ime.ps1 -DryRun # 先看会执行哪些命令
+它做四件事：把损坏的运行期资源目录 /sdcard/TouchPalv5 移到 .bak（这是"键盘弹不出/空视图高度0"的修复关键， 迫使应用首启重新解压内置 TouchPalResources.tprc 并加载默认皮肤）→ 卸载 → install -r -g base.apk → ime enable/set 设为默认输入法。若只想重装、不动资源目录，加 -NoReset。
+
+已经装好、键盘正常的朋友可跳过第 0 步，直接从下面的①开始。注意：跑完第 0 步会把 Backup/ 一并移走， 若之前部署过五笔词库，需重新执行①。
+
+三步走（启用五笔）
+# ① 部署成品词库到手机
+powershell -File TouchPal\bin\deploy.ps1
+
+# ② 到手机上：打开触宝 → 用户词/备份与恢复 → 「恢复用户词（从 SD 卡）」
+#    （这一步把 SD 卡上的 shortcut.lst / files.zip 导入应用私有目录，非 root 唯一入口）
+
+# ③ 校验是否真的导入成功
+powershell -File TouchPal\bin\readback.ps1 -Find aaad
+看到 readback 打印出记录数 ≈ 89254 且能定位到 aaad → 工期，即在拼音键盘上敲 aaad 出 工期。
+
+建议第一次先用小样验证通路：powershell -File TouchPal\bin\deploy.ps1 -Lst TouchPal\dict\pilot.lst， 走完 ②③ 确认生效后再全量。
+
+回滚
+powershell -File TouchPal\bin\deploy.ps1 -Revert   # 还原首次部署前保存的原始 files.zip
+（随后同样在手机上点一次「恢复用户词」以回滚应用侧数据。）
+
+4. 各脚本说明
+脚本	作用	关键参数
+install-ime.ps1	安装 apk\base.apk 并设为默认 IME；含资源重置（修复键盘弹不出）	-Apk、-Device、-NoReset、-DryRun
+deploy.ps1	拉取设备当前 files.zip 作基线 → 注入 shortcut.lst → 回环校验 → 推送 zip 与散文件	-Lst <词库>（默认 dict\full.lst）、-Device、-Revert
+readback.ps1	拉回设备 files.zip，抽出 shortcut.lst，报告条数/预览/定位	-Find <码>、-Show <n>、-Device
+build-phrase.ps1	从 dict\wubi.txt 重建词库（默认全 4 键全码，-Graded 叠加短简码）	-Wubi、-Out、-Graded、-SimpleMaxPerCode
+deploy.ps1 的推送是双通道：既把 shortcut.lst 打进 files.zip 内，也写一份同名散文件到 /sdcard/TouchPalv5/Backup/——因为触宝的备份在两处都留了副本，恢复时读哪一份都能对上。
+
+5. 词库构建细节（想改词库 / 换码表的人看这里）
+源词库 dict/wubi.txt 每行 词 码 权重，按权重降序。构建策略（build-phrase.ps1 已实现）：
+
+全 4 键全码：node lib\shortcut_build.js build dict\wubi.txt out.lst --len=4 → 83122 条。 4 键全码是最安全的：一个完整五笔码不会和任何拼音音节撞车。
+代价：五笔里大量单字只有短简码（如 钱 = qg/qgt，没有 4 键形式），只按 4 键过滤会丢掉六千余单字。
+分级补回简码：--len=1/2/3 各建一份，用 --maxPerCode=1 限制每个短码最多 1 词以压冲突， 再 merge 合并：node lib\shortcut_build.js merge full.lst b4.lst b3.lst b2.lst b1.lst。 分级规模：一级(25)、二级(656)、三级(5426)、4键(83122)，合并后约 89254 条，单字覆盖 100%。
+merge 会丢弃完全重复的 (码,词) 且保留第一份文件的顺序；build 支持 --sentCode/--sentWord 在表头放一条哨兵（如 qqqqzy→SENTINEL7X），便于事后用 find 判断应用「恢复」是整体替换还是合并追加。
+先摸底再决定分级：node lib\shortcut_build.js stats dict\wubi.txt。
+6. 逆向思路（给想继续深挖的人）
+6.1 shortcut.lst 二进制格式
+触宝自定义短语文件，无 magic、无校验和，可任意批量伪造：
+
+u32 count                                   (小端)
+count × {
+  u32 nCode;  nCode × UTF-16LE              (触发串：纯小写字母，≤16)
+  u32 nWord;  nWord × UTF-16LE              (上屏内容)
+}
+破格式过程：在 UI 里手工加 4 条自定义短语 → 用应用自带「备份到 SD 卡」导出 → 读出 72 字节的 files.zip 内 shortcut.lst，一次即定格式。经验：逆向私有数据格式前，先找应用自己的导出功能造小样本， 比反汇编读取器（Storage::get_shortcut_file，native、走 blx r7 间接调用、解析类已被 strip）便宜几个数量级。
+
+6.2 非 root 读写私有目录的唯一通道
+com.cootek.smartinputv5 的 allowBackup=false 且非 debuggable：adb backup 不可用、run-as 被拒、 无 root 时 /data/data 不可达。但应用自带「备份用户词到 SD 卡 / 恢复用户词」双向通道，落点在共享存储：
+
+/sdcard/TouchPalv5/Backup/
+   ├── files.zip        <- getFilesDir() 的打包（含 shortcut.lst）
+   └── shortcut.lst     <- 同内容散文件
+往这两处写同名文件、再点「恢复用户词」，即完成向私有目录的批量灌入。
+
+6.3 files.zip 为何要"字节忠实"重建
+lib/ziprebuild.js：未改动的条目按「本地头→下一条本地头」整块原样搬运（绕开 data descriptor）， 新增/替换的 shortcut.lst 以 DEFLATE(method 8) 写入，与触宝自己的写法规整一致。这样除目标文件外一切不变， 避免 zip 结构差异导致应用恢复失败。
+
+7. 当前进度与注意点
+已验证 ✅
+
+词库重建：build-phrase.ps1 -Graded 得到 89254 条、aaad→工期、reparse EXACT、无越界记录。
+注入回环（离线，用真实 files.zip 基线）：ziprebuild 注入 → ziptake 抽回，字节数一致、解析 EXACT。
+脚本可独立运行：adb 自动定位成功、设备自动探测逻辑正确（无设备时如实报错）。
+install-ime.ps1 -DryRun：adb/设备/apk 均正确解析，安装与启用链路与已验证的修复流程一致。
+端到端功能（历史验证）：aaad → 工期 等映射在拼音键盘可正确上屏。
+注意点 / 已知限制 ⚠️
+
+wubi.rom 语言包方案不生效：把 wubi.rom 推进各 language 目录 + 重启，键盘可弹但五笔并未真正启用； 故本方案改用自定义短语替代，push_wubi.ps1 那条路已废弃，不要依赖它。
+必须手动点「恢复用户词」：deploy.ps1 只能把文件放到 SD 卡；进入应用私有目录那一步只能由用户在触宝 UI 触发 （非 root 无法代替点击）。
+这是"用拼音键盘输入五笔码"，不是原生五笔键盘布局：候选来自自定义短语表，没有五笔引擎的字根拆分/容错。
+短简码与拼音有理论冲突：全 4 键码安全；1/2/3 键简码已 maxPerCode=1 限量，若日常拼音被打断， 可退回只用 4 键（build-phrase.ps1 不加 -Graded）。
+推送依赖一次设备在线：逻辑已离线验证；真机端到端（install-ime → deploy → readback）需插线后实跑确认。
+触宝后端全线失效：*.cootek.com 全部 NXDOMAIN，仅影响商店/皮肤下载/在线激活，不影响本方案。
+键盘弹不出已自动化修复：其真因是运行期资源解压态损坏（/sdcard/TouchPalv5/skin 残留损坏皮肤）； install-ime.ps1 已将修复步骤（移走旧资源目录 + 卸载 + 装原始 base.apk 令其重解压）固化为一条命令。
+base.apk 已随仓库入库（v6.5.2.1、cootek 签名、约 43MB），便于他人从零安装；若环境不允许大文件， 可删 apk/base.apk 并用 install-ime.ps1 -Apk <本地路径> 自行指向。
+远端仓库：origin = https://github.com/andylung99/TouchPal-dev.git`，本目录成果已推至android-dev` 分支。
